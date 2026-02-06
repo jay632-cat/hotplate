@@ -1,4 +1,5 @@
-To run a program/recipe for the hotplate:
+To use GUI, run "hotplate_gui.py". To run a program/recipe for the hotplate:
+
 0. Make sure there is a script labeled "hotplate.py" on the Desktop.
 1. Open a command line window (search for "cmd" in search bar). Hit enter.
 2. Change the directory to the desktop. (Do "cd Desktop" in the command line window.)
@@ -19,4 +20,5 @@ Lines beginning with # are comments and are ignored by the script.
 
 An example is labeled "PMMATransferBake.txt", stored in Desktop folder "hotplatescripts"
 To run, cd to Desktop in command line and type "python hotplate.py hotplatescripts\PMMATransferBake.txt"
+
 
