@@ -1,0 +1,18 @@
+#### Hotplate recipe for PMMA/PS low-temperature transfers
+# Date: 10/26/25
+
+# Set to 55 and wait for user input
+55 450 0 -1 0
+
+# Set to 55, stabilize, and dwell for 300 seconds
+55 450 0 300 1
+
+# Set to 85, stabilize, and dwell for 300 seconds
+85 450 0 300 1
+
+# Set to 130, do not stabilize and do not dwell
+130 450 0 0 0
+
+# Turn off hotplate
+25 450 0 0 0
+

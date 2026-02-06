@@ -1,0 +1,7 @@
+#### Hotplate test recipe
+# Date: 10/26/25
+
+# Set to 40 for 1min and turn off
+40 450 0 60 0
+25 450 0 0 0
+
