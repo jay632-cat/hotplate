@@ -3,90 +3,144 @@
 # Date: Oct 26, 2025
 
 import hotplate_wrapper
-import serial
-import serial.tools.list_ports
 import sys
 import re
 import time
-import keyboard
 from datetime import datetime
+from contextlib import nullcontext
 
-# Open serial connection
-ser = hotplate_wrapper.open_comm()
-
-# Check if the file argument is provided
-if len(sys.argv) < 2:
-    print("Usage: python script.py <input_file>")
-    sys.exit(1)
-
-# Get the file name from the command-line arguments
-input_file = sys.argv[1]
-try:
-    # Read the file line by line into a list
+def parse_recipe_file(input_file):
     with open(input_file, 'r') as file:
         lines = file.readlines()
-        lines = [line.strip() for line in lines if line.strip()]  # Remove trailing newlines or spaces
-    print("File content as a list of strings:")
+        lines = [line.strip() for line in lines if line.strip()]
     commands = [line for line in lines if not line.strip().startswith("#")]
-except FileNotFoundError:
-    print(f"Error: File '{input_file}' not found.")
-except Exception as e:
-    print(f"An error occurred: {e}")
 
-# Check that every row has all five numbers
-for onecmd in commands:
-    numbers = re.findall(r"-?\d+", onecmd)  # Extracts all sequences of digits
-    onecmd_values = list(map(int, numbers))  # Converts to integers
-    if len(onecmd_values) != 5:
-        raise Exception("File invalid - not all commands have 5 inputs!")
+    for onecmd in commands:
+        numbers = re.findall(r"-?\d+", onecmd)
+        onecmd_values = list(map(int, numbers))
+        if len(onecmd_values) != 5:
+            raise Exception("File invalid - not all commands have 5 inputs!")
 
-# Display the file commands
-for onecmd in commands:
-    numbers = re.findall(r"-?\d+", onecmd)  # Extracts all sequences of digits
-    onecmd_values = list(map(int, numbers))  # Converts to integers
-    
-    hotplate_wrapper.set_heater_temp(ser, onecmd_values[0])
-    hotplate_wrapper.set_heater_ramp(ser, onecmd_values[1])
-    hotplate_wrapper.set_stir(ser, onecmd_values[2])
-    
-    # Stabilization routine - Poll plate to check temp
-    printtemp = 0
-    last5temps = []
-    print("Wait for hotplate ramp and stabilize... started at: ", datetime.now())
-    while True:
-        if onecmd_values[3] < 0:
-            break
+    return commands
 
-        curtemp = hotplate_wrapper.get_temp(ser)
-        
-        if printtemp == 5:
-            last5temps.append(curtemp)
-            print(last5temps)
-            printtemp = 0
-            if len(last5temps) > 5:
-                last5temps.pop(0)
-            if (onecmd_values[4] == 1 and len(last5temps) > 4 
-                and all(x >= last5temps[0]-1 and x <= last5temps[0]+1 for x in last5temps)
-                and last5temps[0] >= onecmd_values[0]-1
-                and last5temps[0] <= onecmd_values[0]+1):
-                    print("Hotplate at temp. Stabilization done.")
-                    break
-                
-            if onecmd_values[4] == 0 and curtemp >= onecmd_values[0]-2 and curtemp <= onecmd_values[0]+2:
-                print("Hotplate at temp. No stabilization done.")
+def _lock_context(serial_lock):
+    return serial_lock if serial_lock else nullcontext()
+
+def run_recipe(ser, input_file, progress_callback=None, stop_event=None, continue_event=None, serial_lock=None):
+    commands = parse_recipe_file(input_file)
+    total_steps = len(commands)
+
+    if progress_callback:
+        progress_callback({
+            "type": "start",
+            "file": input_file,
+            "total_steps": total_steps
+        })
+
+    for step_index, onecmd in enumerate(commands, start=1):
+        if stop_event and stop_event.is_set():
+            if progress_callback:
+                progress_callback({"type": "cancelled"})
+            return
+
+        numbers = re.findall(r"-?\d+", onecmd)
+        onecmd_values = list(map(int, numbers))
+
+        if progress_callback:
+            progress_callback({
+                "type": "step_start",
+                "step": step_index,
+                "total_steps": total_steps,
+                "target_temp": onecmd_values[0],
+                "ramp_rate": onecmd_values[1],
+                "stir_speed": onecmd_values[2],
+                "dwell_seconds": onecmd_values[3],
+                "stabilize": onecmd_values[4]
+            })
+
+        with _lock_context(serial_lock):
+            hotplate_wrapper.set_heater_temp(ser, onecmd_values[0])
+            hotplate_wrapper.set_heater_ramp(ser, onecmd_values[1])
+            hotplate_wrapper.set_stir(ser, onecmd_values[2])
+
+        # Stabilization routine - Poll plate to check temp
+        printtemp = 0
+        last5temps = []
+        if progress_callback:
+            progress_callback({"type": "stabilizing_start", "step": step_index})
+        while True:
+            if stop_event and stop_event.is_set():
+                if progress_callback:
+                    progress_callback({"type": "cancelled"})
+                return
+
+            if onecmd_values[3] < 0:
                 break
-        printtemp = printtemp + 1
-    
-    # Start dwell timer when stabilized at temp
-    # If dwell == -1, system waits for user input to continue
-    if onecmd_values[3] < 0:
-        input("Press Enter to continue recipe...")
-    else:
-        print('Dwell for: '+numbers[3]+' s')
-        print('Start dwell at: ', datetime.now())
-        time.sleep(onecmd_values[3])
-        print('End dwell at: ', datetime.now())
 
-# Close the serial port
-print("Recipe done.")
-hotplate_wrapper.close_comm(ser)
+            with _lock_context(serial_lock):
+                curtemp = hotplate_wrapper.get_temp(ser)
+
+            if printtemp == 5:
+                last5temps.append(curtemp)
+                print(last5temps)
+                printtemp = 0
+                if len(last5temps) > 5:
+                    last5temps.pop(0)
+                if progress_callback:
+                    progress_callback({
+                        "type": "stabilizing",
+                        "step": step_index,
+                        "temp": curtemp
+                    })
+
+                if (onecmd_values[4] == 1 and len(last5temps) > 4
+                    and all(x >= last5temps[0]-1 and x <= last5temps[0]+1 for x in last5temps)
+                    and last5temps[0] >= onecmd_values[0]-1
+                    and last5temps[0] <= onecmd_values[0]+1):
+                        break
+
+                if onecmd_values[4] == 0 and curtemp >= onecmd_values[0]-2 and curtemp <= onecmd_values[0]+2:
+                    break
+
+            printtemp = printtemp + 1
+            time.sleep(0.2)
+
+        # Start dwell timer when stabilized at temp
+        if onecmd_values[3] < 0:
+            if progress_callback:
+                progress_callback({"type": "await_continue", "step": step_index})
+            if continue_event:
+                while True:
+                    if stop_event and stop_event.is_set():
+                        if progress_callback:
+                            progress_callback({"type": "cancelled"})
+                        return
+                    if continue_event.wait(timeout=0.2):
+                        continue_event.clear()
+                        break
+            else:
+                return
+        else:
+            dwell_seconds = onecmd_values[3]
+            start_time = time.time()
+            if progress_callback:
+                progress_callback({"type": "dwell_start", "step": step_index, "dwell_seconds": dwell_seconds})
+            while True:
+                if stop_event and stop_event.is_set():
+                    if progress_callback:
+                        progress_callback({"type": "cancelled"})
+                    return
+                elapsed = time.time() - start_time
+                if elapsed >= dwell_seconds:
+                    break
+                remaining = max(0, int(dwell_seconds - elapsed))
+                if progress_callback:
+                    progress_callback({
+                        "type": "dwell_tick",
+                        "step": step_index,
+                        "remaining": remaining
+                    })
+                time.sleep(1)
+
+    if progress_callback:
+        progress_callback({"type": "done"})

@@ -4,12 +4,14 @@ from tkinter import ttk, messagebox, filedialog
 import threading
 import time
 import csv
+import os
 from queue import Queue
 from collections import deque
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 from matplotlib.figure import Figure
 import hotplate_wrapper as hw
+import hotplate_runscript as runscript
 
 class TemperatureData:
     """Manages temperature history"""
@@ -49,6 +51,15 @@ class HotplateGUI:
         self.polling_queue = Queue()
         self.polling_stop = threading.Event()
         self.polling_thread = None
+
+        # Recipe execution
+        self.recipe_queue = Queue()
+        self.recipe_stop = threading.Event()
+        self.recipe_continue = threading.Event()
+        self.recipe_thread = None
+        self.recipe_window = None
+        self.recipe_labels = {}
+        self.recipe_continue_button = None
         
         # Create GUI
         self.create_widgets()
@@ -93,13 +104,18 @@ class HotplateGUI:
         self.conn_frame = ttk.LabelFrame(self.left_frame, text="Connection", padding=8)
         self.conn_frame.pack(fill=tk.X, pady=(0, 8))
         
-        self.connect_button = ttk.Button(self.conn_frame, text="Connect to Hotplate", 
-                                         command=self.toggle_connection)
-        self.connect_button.pack(fill=tk.X, pady=(0, 5))
-        
-        self.status_label = ttk.Label(self.conn_frame, text="Disconnected", 
-                                      foreground="red", font=("Arial", 10))
-        self.status_label.pack()
+        self.conn_row = ttk.Frame(self.conn_frame)
+        self.conn_row.pack(fill=tk.X)
+
+        self.status_label = ttk.Label(self.conn_row, text="Disconnected", 
+                  foreground="red", font=("Arial", 10))
+        self.status_label.grid(row=0, column=0, sticky=tk.W)
+
+        self.connect_button = ttk.Button(self.conn_row, text="Connect to Hotplate", 
+                 command=self.toggle_connection)
+        self.connect_button.grid(row=0, column=1, sticky=tk.W, padx=(10, 0))
+
+        self.conn_row.columnconfigure(1, weight=1)
         
         # CURRENT VALUES SECTION
         self.display_frame = ttk.LabelFrame(self.left_frame, text="Current Values", padding=8)
@@ -170,13 +186,19 @@ class HotplateGUI:
         self.stir_off_button = ttk.Button(self.control_frame, text="Turn Off Stirrer", 
                                           command=self.turn_off_stirrer)
         self.stir_off_button.pack(fill=tk.X, pady=(0, 5))
+
+        # Recipe button
+        self.recipe_button = ttk.Button(self.control_frame, text="Run Recipe", 
+                        command=self.run_recipe_prompt)
+        self.recipe_button.pack(fill=tk.X, pady=(0, 5))
         
         # Store control widgets for enable/disable
         self.control_widgets = [
             self.set_temp_input, self.set_temp_button,
             self.set_ramp_input, self.set_ramp_button,
             self.set_stir_input, self.set_stir_button,
-            self.heater_off_button, self.stir_off_button
+            self.heater_off_button, self.stir_off_button,
+            self.recipe_button
         ]
         
         # ===== RIGHT PANEL: PLOT =====
@@ -438,6 +460,204 @@ class HotplateGUI:
         self.temp_data.clear()
         self.update_plot()
         messagebox.showinfo("Success", "Plot data cleared")
+
+    def run_recipe_prompt(self):
+        """Select and run a recipe file"""
+        if not self.connected:
+            messagebox.showwarning("Not Connected", "Please connect to hotplate first")
+            return
+
+        if self.recipe_thread and self.recipe_thread.is_alive():
+            messagebox.showwarning("Recipe Running", "A recipe is already running")
+            return
+
+        initial_dir = os.path.join(os.path.dirname(__file__), "hotplatescripts")
+        if not os.path.isdir(initial_dir):
+            initial_dir = os.path.dirname(__file__)
+
+        file_path = filedialog.askopenfilename(
+            title="Select Recipe File",
+            initialdir=initial_dir,
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+        )
+
+        if not file_path:
+            return
+
+        self.start_recipe(file_path)
+
+    def start_recipe(self, file_path):
+        """Start recipe execution in a background thread"""
+        self.recipe_stop.clear()
+        self.recipe_continue.clear()
+        self.open_recipe_window(file_path)
+
+        self.recipe_thread = threading.Thread(
+            target=self.run_recipe_thread,
+            args=(file_path,),
+            daemon=True
+        )
+        self.recipe_thread.start()
+        self.process_recipe_queue()
+
+    def open_recipe_window(self, file_path):
+        """Open a new window to show recipe progress"""
+        if self.recipe_window and self.recipe_window.winfo_exists():
+            self.recipe_window.destroy()
+
+        self.recipe_window = tk.Toplevel(self.root)
+        self.recipe_window.title("Recipe Progress")
+        self.recipe_window.protocol("WM_DELETE_WINDOW", self.on_recipe_window_close)
+
+        frame = ttk.Frame(self.recipe_window, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(frame, text=f"Recipe: {os.path.basename(file_path)}").pack(anchor=tk.W, pady=(0, 5))
+
+        self.recipe_labels["status"] = ttk.Label(frame, text="Status: Starting")
+        self.recipe_labels["status"].pack(anchor=tk.W)
+
+        self.recipe_labels["step"] = ttk.Label(frame, text="Step: 0/0")
+        self.recipe_labels["step"].pack(anchor=tk.W)
+
+        self.recipe_labels["target"] = ttk.Label(frame, text="Target Temp: -- °C")
+        self.recipe_labels["target"].pack(anchor=tk.W)
+
+        self.recipe_labels["ramp"] = ttk.Label(frame, text="Ramp Rate: -- °C/hr")
+        self.recipe_labels["ramp"].pack(anchor=tk.W)
+
+        self.recipe_labels["stir"] = ttk.Label(frame, text="Stir Speed: -- RPM")
+        self.recipe_labels["stir"].pack(anchor=tk.W)
+
+        self.recipe_labels["dwell"] = ttk.Label(frame, text="Dwell: -- s")
+        self.recipe_labels["dwell"].pack(anchor=tk.W)
+
+        self.recipe_labels["message"] = ttk.Label(frame, text="")
+        self.recipe_labels["message"].pack(anchor=tk.W, pady=(5, 0))
+
+        button_frame = ttk.Frame(frame)
+        button_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.recipe_continue_button = ttk.Button(button_frame, text="Continue", command=self.recipe_continue_step)
+        self.recipe_continue_button.pack(side=tk.LEFT)
+        self.recipe_continue_button.config(state=tk.DISABLED)
+
+        self.recipe_abort_button = ttk.Button(button_frame, text="Abort", command=self.abort_recipe)
+        self.recipe_abort_button.pack(side=tk.LEFT, padx=(5, 0))
+
+    def on_recipe_window_close(self):
+        """Handle closing the recipe progress window"""
+        if self.recipe_thread and self.recipe_thread.is_alive():
+            self.recipe_stop.set()
+        if self.recipe_window:
+            self.recipe_window.destroy()
+        self.recipe_window = None
+
+    def recipe_continue_step(self):
+        """Continue a recipe step waiting for user input"""
+        if self.recipe_continue_button:
+            self.recipe_continue_button.config(state=tk.DISABLED)
+        self.recipe_continue.set()
+
+    def abort_recipe(self):
+        """Abort the running recipe and turn off heater"""
+        self.recipe_stop.set()
+        if self.recipe_continue_button:
+            self.recipe_continue_button.config(state=tk.DISABLED)
+
+        try:
+            if self.connected and self.ser:
+                with self.serial_lock:
+                    hw.set_heater_off(self.ser)
+        except Exception as e:
+            messagebox.showerror("Error", f"Error turning off heater: {str(e)}")
+
+        if self.recipe_window and self.recipe_window.winfo_exists():
+            self.recipe_window.destroy()
+        self.recipe_window = None
+
+    def run_recipe_thread(self, file_path):
+        """Run recipe in a background thread"""
+        try:
+            runscript.run_recipe(
+                self.ser,
+                file_path,
+                progress_callback=self.recipe_queue.put,
+                stop_event=self.recipe_stop,
+                continue_event=self.recipe_continue,
+                serial_lock=self.serial_lock
+            )
+        except Exception as e:
+            self.recipe_queue.put({"type": "error", "message": str(e)})
+
+    def process_recipe_queue(self):
+        """Process recipe progress updates"""
+        try:
+            while True:
+                update = self.recipe_queue.get_nowait()
+                self.handle_recipe_update(update)
+        except Exception:
+            pass
+
+        if self.recipe_window and self.recipe_window.winfo_exists():
+            if (self.recipe_thread and self.recipe_thread.is_alive()) or not self.recipe_queue.empty():
+                self.root.after(200, self.process_recipe_queue)
+
+    def handle_recipe_update(self, update):
+        """Handle a single recipe progress update"""
+        if not self.recipe_window or not self.recipe_window.winfo_exists():
+            return
+
+        update_type = update.get("type")
+
+        if update_type == "start":
+            total_steps = update.get("total_steps", 0)
+            self.recipe_labels["status"].config(text="Status: Running")
+            self.recipe_labels["step"].config(text=f"Step: 0/{total_steps}")
+        elif update_type == "step_start":
+            step = update.get("step", 0)
+            total_steps = update.get("total_steps", 0)
+            self.recipe_labels["step"].config(text=f"Step: {step}/{total_steps}")
+            self.recipe_labels["target"].config(text=f"Target Temp: {update.get('target_temp', '--')} °C")
+            self.recipe_labels["ramp"].config(text=f"Ramp Rate: {update.get('ramp_rate', '--')} °C/hr")
+            self.recipe_labels["stir"].config(text=f"Stir Speed: {update.get('stir_speed', '--')} RPM")
+            dwell = update.get("dwell_seconds", "--")
+            self.recipe_labels["dwell"].config(text=f"Dwell: {dwell} s")
+            self.recipe_labels["message"].config(text="")
+        elif update_type == "stabilizing_start":
+            self.recipe_labels["message"].config(text="Stabilizing temperature...")
+        elif update_type == "stabilizing":
+            temp = update.get("temp", "--")
+            self.recipe_labels["message"].config(text=f"Stabilizing... Current temp: {temp} °C")
+        elif update_type == "dwell_start":
+            dwell = update.get("dwell_seconds", "--")
+            self.recipe_labels["dwell"].config(text=f"Dwell: {dwell} s")
+        elif update_type == "dwell_tick":
+            remaining = update.get("remaining", "--")
+            self.recipe_labels["message"].config(text=f"Dwell remaining: {remaining} s")
+        elif update_type == "await_continue":
+            self.recipe_labels["message"].config(text="Waiting for continue...")
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.NORMAL)
+        elif update_type == "done":
+            self.recipe_labels["status"].config(text="Status: Done")
+            self.recipe_labels["message"].config(text="Recipe complete")
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.DISABLED)
+        elif update_type == "cancelled":
+            self.recipe_labels["status"].config(text="Status: Cancelled")
+            self.recipe_labels["message"].config(text="Recipe cancelled")
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.DISABLED)
+            if self.recipe_abort_button:
+                self.recipe_abort_button.config(state=tk.DISABLED)
+        elif update_type == "error":
+            self.recipe_labels["status"].config(text="Status: Error")
+            self.recipe_labels["message"].config(text=f"Error: {update.get('message', '')}")
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.DISABLED)
+            if self.recipe_abort_button:
+                self.recipe_abort_button.config(state=tk.DISABLED)
     
     def save_csv(self):
         """Save temperature plot data to CSV file"""
@@ -468,6 +688,8 @@ class HotplateGUI:
     
     def on_closing(self):
         """Handle window close event"""
+        if self.recipe_thread and self.recipe_thread.is_alive():
+            self.recipe_stop.set()
         # Stop polling thread
         self.polling_stop.set()
         if self.polling_thread and self.polling_thread.is_alive():
