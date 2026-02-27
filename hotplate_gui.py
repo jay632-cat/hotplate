@@ -1,24 +1,26 @@
 #%%
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 import threading
 import time
+import csv
 from queue import Queue
 from collections import deque
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
 from matplotlib.figure import Figure
 import hotplate_wrapper as hw
 
 class TemperatureData:
     """Manages temperature history"""
-    def __init__(self, max_points=300):
+    def __init__(self, max_points=86400):  # 24 hours at 1 second intervals
         self.timestamps = deque(maxlen=max_points)
         self.temperatures = deque(maxlen=max_points)
         self.start_time = time.time()
     
     def add_point(self, temp):
         elapsed = time.time() - self.start_time
-        self.timestamps.append(elapsed / 60)  # Convert to minutes
+        self.timestamps.append(elapsed)  # Time in seconds
         self.temperatures.append(temp)
     
     def get_data(self):
@@ -39,6 +41,9 @@ class HotplateGUI:
         self.ser = None
         self.connected = False
         self.temp_data = TemperatureData()
+        
+        # Serial communication lock
+        self.serial_lock = threading.Lock()
         
         # Background polling thread
         self.polling_queue = Queue()
@@ -62,7 +67,7 @@ class HotplateGUI:
         """Create all GUI widgets"""
         # Main container
         self.main_frame = ttk.Frame(self.root)
-        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
         
         # ===== LEFT PANEL =====
         self.left_frame = ttk.Frame(self.main_frame)
@@ -70,124 +75,118 @@ class HotplateGUI:
         
         # TITLE SECTION
         self.title_frame = ttk.Frame(self.left_frame)
-        self.title_frame.pack(fill=tk.X, pady=(0, 15))
+        self.title_frame.pack(fill=tk.X, pady=(0, 8))
         
         title_label = ttk.Label(self.title_frame, text="Torrey Pines Hotplate", 
-                                font=("Arial", 16, "bold"))
+                                font=("Arial", 14, "bold"))
         title_label.pack(anchor=tk.W)
         
         date_label = ttk.Label(self.title_frame, text="February 26, 2026", 
-                               font=("Arial", 10))
+                               font=("Arial", 9))
         date_label.pack(anchor=tk.W)
         
         author_label = ttk.Label(self.title_frame, text="Author: Jerry A. Yang", 
-                                 font=("Arial", 10))
+                                 font=("Arial", 9))
         author_label.pack(anchor=tk.W)
         
         # CONNECTION SECTION
-        self.conn_frame = ttk.LabelFrame(self.left_frame, text="Connection", padding=10)
-        self.conn_frame.pack(fill=tk.X, pady=(0, 10))
+        self.conn_frame = ttk.LabelFrame(self.left_frame, text="Connection", padding=8)
+        self.conn_frame.pack(fill=tk.X, pady=(0, 8))
         
         self.connect_button = ttk.Button(self.conn_frame, text="Connect to Hotplate", 
                                          command=self.toggle_connection)
-        self.connect_button.pack(fill=tk.X, pady=(0, 10))
+        self.connect_button.pack(fill=tk.X, pady=(0, 5))
         
         self.status_label = ttk.Label(self.conn_frame, text="Disconnected", 
                                       foreground="red", font=("Arial", 10))
         self.status_label.pack()
         
         # CURRENT VALUES SECTION
-        self.display_frame = ttk.LabelFrame(self.left_frame, text="Current Values", padding=10)
-        self.display_frame.pack(fill=tk.X, pady=(0, 10))
+        self.display_frame = ttk.LabelFrame(self.left_frame, text="Current Values", padding=8)
+        self.display_frame.pack(fill=tk.X, pady=(0, 8))
         
         # Current Temperature
-        ttk.Label(self.display_frame, text="Current Temp:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        ttk.Label(self.display_frame, text="Current Temp:").grid(row=0, column=0, sticky=tk.W, pady=3)
         self.current_temp_value = ttk.Label(self.display_frame, text="-- °C", 
                                             font=("Arial", 12, "bold"), foreground="blue")
-        self.current_temp_value.grid(row=0, column=1, sticky=tk.E, pady=5)
+        self.current_temp_value.grid(row=0, column=1, sticky=tk.E, pady=3)
         
         # Setpoint Temperature
-        ttk.Label(self.display_frame, text="Setpoint Temp:").grid(row=1, column=0, sticky=tk.W, pady=5)
+        ttk.Label(self.display_frame, text="Setpoint Temp:").grid(row=1, column=0, sticky=tk.W, pady=3)
         self.setpoint_temp_value = ttk.Label(self.display_frame, text="-- °C", 
                                              font=("Arial", 11), foreground="green")
-        self.setpoint_temp_value.grid(row=1, column=1, sticky=tk.E, pady=5)
+        self.setpoint_temp_value.grid(row=1, column=1, sticky=tk.E, pady=3)
         
         # Ramp Rate
-        ttk.Label(self.display_frame, text="Ramp Rate:").grid(row=2, column=0, sticky=tk.W, pady=5)
+        ttk.Label(self.display_frame, text="Ramp Rate:").grid(row=2, column=0, sticky=tk.W, pady=3)
         self.ramp_rate_value = ttk.Label(self.display_frame, text="-- °C/hr", 
                                          font=("Arial", 11), foreground="purple")
-        self.ramp_rate_value.grid(row=2, column=1, sticky=tk.E, pady=5)
+        self.ramp_rate_value.grid(row=2, column=1, sticky=tk.E, pady=3)
         
         # Stir Speed
-        ttk.Label(self.display_frame, text="Stir Speed:").grid(row=3, column=0, sticky=tk.W, pady=5)
+        ttk.Label(self.display_frame, text="Stir Speed:").grid(row=3, column=0, sticky=tk.W, pady=3)
         self.stir_speed_value = ttk.Label(self.display_frame, text="-- RPM", 
                                           font=("Arial", 11), foreground="darkorange")
-        self.stir_speed_value.grid(row=3, column=1, sticky=tk.E, pady=5)
+        self.stir_speed_value.grid(row=3, column=1, sticky=tk.E, pady=3)
         
         self.display_frame.columnconfigure(1, weight=1)
         
         # CONTROLS SECTION
-        self.control_frame = ttk.LabelFrame(self.left_frame, text="Controls", padding=10)
-        self.control_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        self.control_frame = ttk.LabelFrame(self.left_frame, text="Controls", padding=8)
+        self.control_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
         
         # Temperature control
-        ttk.Label(self.control_frame, text="Set Temperature (°C):").pack(anchor=tk.W, pady=(10, 5))
+        ttk.Label(self.control_frame, text="Set Temperature (°C):").pack(anchor=tk.W, pady=(5, 2))
         self.set_temp_input = ttk.Spinbox(self.control_frame, from_=30, to=500, width=10)
-        self.set_temp_input.set(100)
-        self.set_temp_input.pack(fill=tk.X, pady=(0, 5))
+        self.set_temp_input.set(25)
+        self.set_temp_input.pack(fill=tk.X, pady=(0, 2))
         self.set_temp_button = ttk.Button(self.control_frame, text="Set Temperature", 
                                           command=self.set_temperature)
-        self.set_temp_button.pack(fill=tk.X, pady=(0, 15))
+        self.set_temp_button.pack(fill=tk.X, pady=(0, 8))
         
         # Ramp rate control
-        ttk.Label(self.control_frame, text="Set Ramp Rate (°C/hr):").pack(anchor=tk.W, pady=(10, 5))
+        ttk.Label(self.control_frame, text="Set Ramp Rate (°C/hr):").pack(anchor=tk.W, pady=(5, 2))
         self.set_ramp_input = ttk.Spinbox(self.control_frame, from_=1, to=300, width=10)
-        self.set_ramp_input.set(10)
-        self.set_ramp_input.pack(fill=tk.X, pady=(0, 5))
+        self.set_ramp_input.set(450)
+        self.set_ramp_input.pack(fill=tk.X, pady=(0, 2))
         self.set_ramp_button = ttk.Button(self.control_frame, text="Set Ramp Rate", 
                                           command=self.set_ramp_rate)
-        self.set_ramp_button.pack(fill=tk.X, pady=(0, 15))
+        self.set_ramp_button.pack(fill=tk.X, pady=(0, 8))
         
         # Stir speed control
-        ttk.Label(self.control_frame, text="Set Stir Speed (RPM):").pack(anchor=tk.W, pady=(10, 5))
+        ttk.Label(self.control_frame, text="Set Stir Speed (RPM):").pack(anchor=tk.W, pady=(5, 2))
         self.set_stir_input = ttk.Spinbox(self.control_frame, from_=0, to=1500, width=10)
-        self.set_stir_input.set(500)
-        self.set_stir_input.pack(fill=tk.X, pady=(0, 5))
+        self.set_stir_input.set(0)
+        self.set_stir_input.pack(fill=tk.X, pady=(0, 2))
         self.set_stir_button = ttk.Button(self.control_frame, text="Set Stir Speed", 
                                           command=self.set_stir_speed)
-        self.set_stir_button.pack(fill=tk.X, pady=(0, 15))
+        self.set_stir_button.pack(fill=tk.X, pady=(0, 8))
         
         # Off buttons
         self.heater_off_button = ttk.Button(self.control_frame, text="Turn Off Heater", 
                                             command=self.turn_off_heater)
-        self.heater_off_button.pack(fill=tk.X, pady=(0, 10))
+        self.heater_off_button.pack(fill=tk.X, pady=(0, 5))
         
         self.stir_off_button = ttk.Button(self.control_frame, text="Turn Off Stirrer", 
                                           command=self.turn_off_stirrer)
-        self.stir_off_button.pack(fill=tk.X, pady=(0, 10))
-        
-        # Clear button
-        self.clear_button = ttk.Button(self.control_frame, text="Clear Plot Data", 
-                                       command=self.clear_plot_data)
-        self.clear_button.pack(fill=tk.X)
+        self.stir_off_button.pack(fill=tk.X, pady=(0, 5))
         
         # Store control widgets for enable/disable
         self.control_widgets = [
             self.set_temp_input, self.set_temp_button,
             self.set_ramp_input, self.set_ramp_button,
             self.set_stir_input, self.set_stir_button,
-            self.heater_off_button, self.stir_off_button,
-            self.clear_button
+            self.heater_off_button, self.stir_off_button
         ]
         
         # ===== RIGHT PANEL: PLOT =====
-        self.plot_frame = ttk.LabelFrame(self.main_frame, text="Temperature Plot", padding=10)
+        self.plot_frame = ttk.LabelFrame(self.main_frame, text="Temperature Plot", padding=8)
         self.plot_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
         
         # Create matplotlib figure
         self.figure = Figure(figsize=(6, 5), dpi=100)
         self.ax = self.figure.add_subplot(111)
-        self.ax.set_xlabel("Time (minutes)")
+        self.ax.set_xlabel("Time (seconds)")
         self.ax.set_ylabel("Temperature (°C)")
         self.ax.set_title("Temperature vs Time")
         self.ax.grid(True, alpha=0.3)
@@ -195,6 +194,20 @@ class HotplateGUI:
         # Embed in tkinter
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.plot_frame)
         self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        
+        # Plot control buttons frame
+        self.plot_buttons_frame = ttk.Frame(self.plot_frame)
+        self.plot_buttons_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        # Save CSV button
+        self.save_csv_button = ttk.Button(self.plot_buttons_frame, text="Save Plot as CSV", 
+                                          command=self.save_csv)
+        self.save_csv_button.pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Clear button
+        self.clear_button = ttk.Button(self.plot_buttons_frame, text="Clear Plot Data", 
+                                       command=self.clear_plot_data)
+        self.clear_button.pack(side=tk.LEFT)
     
     def create_layout(self):
         """Layout is created in create_widgets for tkinter"""
@@ -254,10 +267,11 @@ class HotplateGUI:
         while not self.polling_stop.is_set():
             if self.connected and self.ser:
                 try:
-                    current_temp = hw.get_temp(self.ser)
-                    setpoint_temp = hw.get_target_temp(self.ser)
-                    ramp_rate = hw.get_ramp(self.ser)
-                    stir_speed = hw.get_stir(self.ser)
+                    with self.serial_lock:
+                        current_temp = hw.get_temp(self.ser)
+                        setpoint_temp = hw.get_target_temp(self.ser)
+                        ramp_rate = hw.get_ramp(self.ser)
+                        stir_speed = hw.get_stir(self.ser)
                     
                     # Put data in queue for main thread to consume
                     self.polling_queue.put({
@@ -288,7 +302,12 @@ class HotplateGUI:
                 self.current_temp_value.config(text=f"{data['current_temp']} °C")
                 self.setpoint_temp_value.config(text=f"{data['setpoint_temp']} °C")
                 self.ramp_rate_value.config(text=f"{data['ramp_rate']} °C/hr")
-                self.stir_speed_value.config(text=f"{data['stir_speed']} RPM")
+                
+                # Display stir speed or warning if no data
+                if data['stir_speed'] <= 0:
+                    self.stir_speed_value.config(text="No data")
+                else:
+                    self.stir_speed_value.config(text=f"{data['stir_speed']} RPM")
                 
                 # Update plot
                 self.update_plot()
@@ -316,7 +335,7 @@ class HotplateGUI:
                 except:
                     pass
         
-        self.ax.set_xlabel("Time (minutes)")
+        self.ax.set_xlabel("Time (seconds)")
         self.ax.set_ylabel("Temperature (°C)")
         self.ax.set_title("Temperature vs Time")
         self.ax.grid(True, alpha=0.3)
@@ -333,7 +352,9 @@ class HotplateGUI:
         
         try:
             temp = int(self.set_temp_input.get())
-            if hw.set_heater_temp(self.ser, temp):
+            with self.serial_lock:
+                result = hw.set_heater_temp(self.ser, temp)
+            if result:
                 messagebox.showinfo("Success", f"Temperature set to {temp} °C")
             else:
                 messagebox.showwarning("Failed", "Failed to set temperature")
@@ -348,7 +369,9 @@ class HotplateGUI:
         
         try:
             ramp = int(self.set_ramp_input.get())
-            if hw.set_heater_ramp(self.ser, ramp):
+            with self.serial_lock:
+                result = hw.set_heater_ramp(self.ser, ramp)
+            if result:
                 messagebox.showinfo("Success", f"Ramp rate set to {ramp} °C/hr")
             else:
                 messagebox.showwarning("Failed", "Failed to set ramp rate")
@@ -363,10 +386,15 @@ class HotplateGUI:
         
         try:
             speed = int(self.set_stir_input.get())
+            with self.serial_lock:
+                if speed == 0:
+                    result = hw.set_stir_off(self.ser)
+                else:
+                    result = hw.set_stir(self.ser, speed)
+            
             if speed == 0:
-                hw.set_stir_off(self.ser)
                 messagebox.showinfo("Success", "Stirrer turned off")
-            elif hw.set_stir(self.ser, speed):
+            elif result:
                 messagebox.showinfo("Success", f"Stir speed set to {speed} RPM")
             else:
                 messagebox.showwarning("Failed", "Failed to set stir speed")
@@ -380,7 +408,9 @@ class HotplateGUI:
             return
         
         try:
-            if hw.set_heater_off(self.ser):
+            with self.serial_lock:
+                result = hw.set_heater_off(self.ser)
+            if result:
                 messagebox.showinfo("Success", "Heater turned off")
             else:
                 messagebox.showwarning("Failed", "Failed to turn off heater")
@@ -394,7 +424,9 @@ class HotplateGUI:
             return
         
         try:
-            if hw.set_stir_off(self.ser):
+            with self.serial_lock:
+                result = hw.set_stir_off(self.ser)
+            if result:
                 messagebox.showinfo("Success", "Stirrer turned off")
             else:
                 messagebox.showwarning("Failed", "Failed to turn off stirrer")
@@ -406,6 +438,33 @@ class HotplateGUI:
         self.temp_data.clear()
         self.update_plot()
         messagebox.showinfo("Success", "Plot data cleared")
+    
+    def save_csv(self):
+        """Save temperature plot data to CSV file"""
+        times, temps = self.temp_data.get_data()
+        
+        if not times or not temps:
+            messagebox.showwarning("No Data", "No temperature data to save")
+            return
+        
+        try:
+            # Open file dialog to choose save location
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+                title="Save Temperature Data"
+            )
+            
+            if file_path:
+                with open(file_path, 'w', newline='') as csvfile:
+                    writer = csv.writer(csvfile)
+                    writer.writerow(["Time (seconds)", "Temperature (°C)"])
+                    for t, temp in zip(times, temps):
+                        writer.writerow([t, temp])
+                
+                messagebox.showinfo("Success", f"Data saved to {file_path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error saving CSV: {str(e)}")
     
     def on_closing(self):
         """Handle window close event"""

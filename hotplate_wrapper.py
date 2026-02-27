@@ -1,3 +1,4 @@
+#%%
 ######## Hotplate Communication Functions - RS-232 Wrapper #######
 # Author: Jerry A. Yang
 # Date: Oct 26, 2025
@@ -38,8 +39,14 @@ def set_heater_temp(ser, temp):
     cmdheat = 'A'+str(temp)+'\r'
     ser.write(cmdheat.encode('utf-8'))
     data = ser.read(100) # Read up to 100 bytes
-    if 'OK' not in data.decode('utf-8'):
-        print("Set Heater Temp Failed!")
+    try:
+        response = data.decode('utf-8', errors='ignore')
+        print(f"Response: {response}")
+        if 'OK' not in response.upper():
+            print("Set Heater Temp Failed!")
+            return False
+    except Exception as e:
+        print(f"Error decoding response: {e}")
         return False
     print("Set Heater Temp Success!")
     return True
@@ -49,8 +56,14 @@ def set_heater_ramp(ser, ramp):
     cmdheat = 'D'+str(ramp)+'\r'
     ser.write(cmdheat.encode('utf-8'))
     data = ser.read(100) # Read up to 100 bytes
-    if 'OK' not in data.decode('utf-8'):
-        print("Set Heater Ramp Failed!")
+    try:
+        response = data.decode('utf-8', errors='ignore')
+        print(f"Response: {response}")
+        if 'OK' not in response.upper():
+            print("Set Heater Ramp Failed!")
+            return False
+    except Exception as e:
+        print(f"Error decoding response: {e}")
         return False
     print("Set Heater Ramp Success!")
     return True
@@ -60,8 +73,14 @@ def set_heater_off(ser):
     cmdstir = 'G\r'
     ser.write(cmdstir.encode('utf-8'))
     data = ser.read(100) # Read up to 100 bytes
-    if 'OK' not in data.decode('utf-8'):
-        print("Heater Turn Off Failed!")
+    try:
+        response = data.decode('utf-8', errors='ignore')
+        print(f"Response: {response}")
+        if 'OK' not in response.upper():
+            print("Heater Turn Off Failed!")
+            return False
+    except Exception as e:
+        print(f"Error decoding response: {e}")
         return False
     print("Heater Turn Off Success!")
     return True
@@ -72,6 +91,9 @@ def get_temp(ser):
     ser.write(cmdgettemp.encode('utf-8'))
     data = ser.read(100)
     curtemp = re.findall(r"-?\d+", data.decode('utf-8'))  # Extracts all sequences of digits
+    if not curtemp:
+        print("Warning: No temperature data received")
+        return 0
     curtemp = [int(x) for x in curtemp]  # Converts to integers
     curtemp = curtemp[0]
     return curtemp
@@ -82,6 +104,9 @@ def get_target_temp(ser):
     ser.write(cmdgettemp.encode('utf-8'))
     data = ser.read(100) 
     curtemp = re.findall(r"-?\d+", data.decode('utf-8'))  # Extracts all sequences of digits
+    if not curtemp:
+        print("Warning: No target temperature data received")
+        return 0
     curtemp = [int(x) for x in curtemp]  # Converts to integers
     curtemp = curtemp[0]
     return curtemp
@@ -92,6 +117,9 @@ def get_ramp(ser):
     ser.write(cmdgettemp.encode('utf-8'))
     data = ser.read(100)
     curtemp = re.findall(r"-?\d+", data.decode('utf-8'))  # Extracts all sequences of digits
+    if not curtemp:
+        print("Warning: No ramp data received")
+        return 0
     curtemp = [int(x) for x in curtemp]  # Converts to integers
     curtemp = curtemp[0]
     return curtemp
@@ -105,8 +133,14 @@ def set_stir(ser, stir):
     cmdstir = 'E'+str(stir)+'\r'
     ser.write(cmdstir.encode('utf-8'))
     data = ser.read(100) # Read up to 100 bytes
-    if 'OK' not in data.decode('utf-8'):
-        print("Set Stir Speed Failed!")
+    try:
+        response = data.decode('utf-8', errors='ignore')
+        print(f"Response: {response}")
+        if 'OK' not in response.upper():
+            print("Set Stir Speed Failed!")
+            return False
+    except Exception as e:
+        print(f"Error decoding response: {e}")
         return False
     print("Set Stir Speed Success!")
     return True
@@ -116,8 +150,14 @@ def set_stir_off(ser):
     cmdstir = 'F\r'
     ser.write(cmdstir.encode('utf-8'))
     data = ser.read(100) # Read up to 100 bytes
-    if 'OK' not in data.decode('utf-8'):
-        print("Stirrer Turn Off Failed!")
+    try:
+        response = data.decode('utf-8', errors='ignore')
+        print(f"Response: {response}")
+        if 'OK' not in response.upper():
+            print("Stirrer Turn Off Failed!")
+            return False
+    except Exception as e:
+        print(f"Error decoding response: {e}")
         return False
     print("Stirrer Turn Off Success!")
     return True
@@ -127,8 +167,11 @@ def get_stir(ser):
     cmdgetspeed = 'g\r'
     ser.write(cmdgetspeed.encode('utf-8'))
     data = ser.read(100)
-    
+    print(data.decode('utf-8'))
     curspeed = re.findall(r"-?\d+", data.decode('utf-8'))  # Extracts all sequences of digits
+    if not curspeed:
+        print("Warning: No stir speed data received")
+        return 0
     curspeed = [int(x) for x in curspeed]  # Converts to integers
     curspeed = curspeed[0]
     return curspeed
