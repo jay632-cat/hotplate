@@ -8,8 +8,9 @@ import os
 from queue import Queue
 from collections import deque
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
 from matplotlib.figure import Figure
+import matplotlib.dates as mdates
+from datetime import datetime, timedelta
 import hotplate_wrapper as hw
 import hotplate_runscript as runscript
 
@@ -208,7 +209,7 @@ class HotplateGUI:
         # Create matplotlib figure
         self.figure = Figure(figsize=(6, 5), dpi=100)
         self.ax = self.figure.add_subplot(111)
-        self.ax.set_xlabel("Time (seconds)")
+        self.ax.set_xlabel("Time (hh:mm:ss)")
         self.ax.set_ylabel("Temperature (°C)")
         self.ax.set_title("Temperature vs Time")
         self.ax.grid(True, alpha=0.3)
@@ -346,7 +347,15 @@ class HotplateGUI:
         
         self.ax.clear()
         if times and temps:
-            self.ax.plot(times, temps, 'b-', linewidth=2, label='Temperature')
+            # Convert seconds to datetime objects for formatting
+            base_time = datetime(2000, 1, 1)  # Arbitrary base date
+            time_objs = [base_time + timedelta(seconds=t) for t in times]
+            
+            self.ax.plot(time_objs, temps, 'b-', linewidth=2, label='Temperature')
+            
+            # Format x-axis as hh:mm:ss
+            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            self.figure.autofmt_xdate()  # Rotate and align the tick labels
             
             # Get setpoint temperature and draw horizontal line
             setpoint_text = self.setpoint_temp_value.cget("text")
@@ -357,7 +366,7 @@ class HotplateGUI:
                 except:
                     pass
         
-        self.ax.set_xlabel("Time (seconds)")
+        self.ax.set_xlabel("Time (hh:mm:ss)")
         self.ax.set_ylabel("Temperature (°C)")
         self.ax.set_title("Temperature vs Time")
         self.ax.grid(True, alpha=0.3)
