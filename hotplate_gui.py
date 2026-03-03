@@ -362,7 +362,8 @@ class HotplateGUI:
             if setpoint_text != "-- °C":
                 try:
                     setpoint = float(setpoint_text.split()[0])
-                    self.ax.axhline(y=setpoint, color='g', linestyle='--', alpha=0.7, label='Setpoint')
+                    if setpoint >= 20:  # Only show setpoint if 20°C or higher
+                        self.ax.axhline(y=setpoint, color='g', linestyle='--', alpha=0.7, label='Setpoint')
                 except:
                     pass
         
