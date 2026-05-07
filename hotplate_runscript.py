@@ -142,5 +142,38 @@ def run_recipe(ser, input_file, progress_callback=None, stop_event=None, continu
                     })
                 time.sleep(1)
 
+        # If this was the final step and the target is below 30°C,
+        # keep the recipe open until the hotplate cools to 30°C.
+        if step_index == total_steps and onecmd_values[0] < 30:
+            if progress_callback:
+                progress_callback({
+                    "type": "final_cooling_start",
+                    "step": step_index,
+                    "target_temp": onecmd_values[0],
+                    "threshold": 30
+                })
+
+            while True:
+                if stop_event and stop_event.is_set():
+                    if progress_callback:
+                        progress_callback({"type": "cancelled"})
+                    return
+
+                with _lock_context(serial_lock):
+                    curtemp = hotplate_wrapper.get_temp(ser)
+
+                if progress_callback:
+                    progress_callback({
+                        "type": "final_cooling",
+                        "step": step_index,
+                        "temp": curtemp,
+                        "threshold": 30
+                    })
+
+                if curtemp <= 30:
+                    break
+
+                time.sleep(1)
+
     if progress_callback:
         progress_callback({"type": "done"})

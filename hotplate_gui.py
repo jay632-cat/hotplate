@@ -555,13 +555,17 @@ class HotplateGUI:
         self.recipe_abort_button = ttk.Button(button_frame, text="Abort", command=self.abort_recipe)
         self.recipe_abort_button.pack(side=tk.LEFT, padx=(5, 0))
 
+    def close_recipe_window(self):
+        """Close the recipe progress window if it exists"""
+        if self.recipe_window and self.recipe_window.winfo_exists():
+            self.recipe_window.destroy()
+        self.recipe_window = None
+
     def on_recipe_window_close(self):
         """Handle closing the recipe progress window"""
         if self.recipe_thread and self.recipe_thread.is_alive():
             self.recipe_stop.set()
-        if self.recipe_window:
-            self.recipe_window.destroy()
-        self.recipe_window = None
+        self.close_recipe_window()
 
     def recipe_continue_step(self):
         """Continue a recipe step waiting for user input"""
@@ -582,9 +586,7 @@ class HotplateGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Error turning off heater: {str(e)}")
 
-        if self.recipe_window and self.recipe_window.winfo_exists():
-            self.recipe_window.destroy()
-        self.recipe_window = None
+        self.close_recipe_window()
 
     def run_recipe_thread(self, file_path):
         """Run recipe in a background thread"""
@@ -645,6 +647,11 @@ class HotplateGUI:
         elif update_type == "dwell_tick":
             remaining = update.get("remaining", "--")
             self.recipe_labels["message"].config(text=f"Dwell remaining: {remaining} s")
+        elif update_type == "final_cooling_start":
+            self.recipe_labels["message"].config(text="Waiting for hotplate to reach 30 °C...")
+        elif update_type == "final_cooling":
+            temp = update.get("temp", "--")
+            self.recipe_labels["message"].config(text=f"Cooling... Current temp: {temp} °C")
         elif update_type == "await_continue":
             self.recipe_labels["message"].config(text="Waiting for continue...")
             if self.recipe_continue_button:
@@ -654,6 +661,7 @@ class HotplateGUI:
             self.recipe_labels["message"].config(text="Recipe complete")
             if self.recipe_continue_button:
                 self.recipe_continue_button.config(state=tk.DISABLED)
+            self.close_recipe_window()
         elif update_type == "cancelled":
             self.recipe_labels["status"].config(text="Status: Cancelled")
             self.recipe_labels["message"].config(text="Recipe cancelled")
