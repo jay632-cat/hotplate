@@ -621,6 +621,11 @@ class HotplateGUI:
             dwell = update.get("dwell_seconds", "--")
             self.recipe_labels["dwell"].config(text=f"Dwell: {dwell} s")
             self.recipe_labels["message"].config(text="")
+            if self.recipe_continue_button:
+                if step == total_steps and total_steps > 0:
+                    self.recipe_continue_button.config(text="End Recipe")
+                else:
+                    self.recipe_continue_button.config(text="Next Step")
             # Enable continue button to skip this step
             if self.recipe_continue_button:
                 self.recipe_continue_button.config(state=tk.NORMAL)

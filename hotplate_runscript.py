@@ -81,6 +81,10 @@ def run_recipe(ser, input_file, progress_callback=None, stop_event=None, continu
                     progress_callback({"type": "cancelled"})
                 return
 
+            if continue_event and continue_event.is_set():
+                continue_event.clear()
+                break
+
             if onecmd_values[3] < 0:
                 break
 
@@ -126,6 +130,9 @@ def run_recipe(ser, input_file, progress_callback=None, stop_event=None, continu
                     if progress_callback:
                         progress_callback({"type": "cancelled"})
                     return
+                if continue_event and continue_event.is_set():
+                    continue_event.clear()
+                    break
                 elapsed = time.time() - start_time
                 if elapsed >= dwell_seconds:
                     break
@@ -137,6 +144,20 @@ def run_recipe(ser, input_file, progress_callback=None, stop_event=None, continu
                         "remaining": remaining
                     })
                 time.sleep(1)
+
+        # If this was the final step and target<30 with stir=0 and dwell=0,
+        # turn the heater off and finish immediately.
+        if (
+            step_index == total_steps
+            and onecmd_values[0] < 30
+            and onecmd_values[2] == 0
+            and onecmd_values[3] == 0
+        ):
+            with _lock_context(serial_lock):
+                hotplate_wrapper.set_heater_off(ser)
+            if progress_callback:
+                progress_callback({"type": "done"})
+            return
 
         # If this was the final step and the target is below 30°C,
         # keep the recipe open until the hotplate cools to 30°C.
@@ -154,6 +175,10 @@ def run_recipe(ser, input_file, progress_callback=None, stop_event=None, continu
                     if progress_callback:
                         progress_callback({"type": "cancelled"})
                     return
+
+                if continue_event and continue_event.is_set():
+                    continue_event.clear()
+                    break
 
                 with _lock_context(serial_lock):
                     curtemp = hotplate_wrapper.get_temp(ser)
