@@ -62,13 +62,20 @@ def run_recipe(ser, input_file, progress_callback=None, stop_event=None, continu
             hotplate_wrapper.set_heater_temp(ser, onecmd_values[0])
             hotplate_wrapper.set_heater_ramp(ser, onecmd_values[1])
             hotplate_wrapper.set_stir(ser, onecmd_values[2])
+            # Check current temperature to see if we're already at setpoint
+            current_temp = hotplate_wrapper.get_temp(ser)
+
+        # Determine if we're already at the target temperature
+        target_temp = onecmd_values[0]
+        already_at_temp = (current_temp >= target_temp - 2 and current_temp <= target_temp + 2)
 
         # Stabilization routine - Poll plate to check temp
         printtemp = 0
         last5temps = []
-        if progress_callback:
-            progress_callback({"type": "stabilizing_start", "step": step_index})
-        while True:
+        if not already_at_temp:
+            if progress_callback:
+                progress_callback({"type": "stabilizing_start", "step": step_index})
+        while not already_at_temp:
             if stop_event and stop_event.is_set():
                 if progress_callback:
                     progress_callback({"type": "cancelled"})
@@ -107,19 +114,8 @@ def run_recipe(ser, input_file, progress_callback=None, stop_event=None, continu
 
         # Start dwell timer when stabilized at temp
         if onecmd_values[3] < 0:
-            if progress_callback:
-                progress_callback({"type": "await_continue", "step": step_index})
-            if continue_event:
-                while True:
-                    if stop_event and stop_event.is_set():
-                        if progress_callback:
-                            progress_callback({"type": "cancelled"})
-                        return
-                    if continue_event.wait(timeout=0.2):
-                        continue_event.clear()
-                        break
-            else:
-                return
+            # No dwell - advance to next step automatically
+            pass
         else:
             dwell_seconds = onecmd_values[3]
             start_time = time.time()

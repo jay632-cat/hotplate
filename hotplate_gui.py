@@ -10,6 +10,7 @@ from collections import deque
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 import matplotlib.dates as mdates
+from matplotlib.ticker import FuncFormatter
 from datetime import datetime, timedelta
 import hotplate_wrapper as hw
 import hotplate_runscript as runscript
@@ -62,6 +63,12 @@ class HotplateGUI:
         self.recipe_labels = {}
         self.recipe_continue_button = None
         
+        # Command worker for async button operations
+        self.command_queue = Queue()
+        self.command_stop = threading.Event()
+        self.command_thread = None
+        self.operation_in_progress = False
+        
         # Create GUI
         self.create_widgets()
         self.create_layout()
@@ -69,11 +76,16 @@ class HotplateGUI:
         # Start periodic update
         self.periodic_update()
         
+        # Start command worker thread
+        self.command_stop.clear()
+        self.command_thread = threading.Thread(target=self.command_worker, daemon=True)
+        self.command_thread.start()
+        
         # Handle window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
         
         # Auto-connect on startup
-        self.root.after(100, self.connect)
+        self.root.after(100, lambda: self.queue_command('connect', None))
     
     def create_widgets(self):
         """Create all GUI widgets"""
@@ -237,32 +249,36 @@ class HotplateGUI:
         pass
     
     def toggle_connection(self):
-        """Connect or disconnect from hotplate"""
+        """Queue connection/disconnection command"""
         if not self.connected:
-            self.connect()
+            self.queue_command('connect', None)
         else:
-            self.disconnect()
+            self.queue_command('disconnect', None)
     
     def connect(self):
-        """Establish connection to hotplate"""
+        """Establish connection to hotplate (runs in worker thread)"""
         try:
+            self.update_connection_status(False, "Connecting...")
             self.ser = hw.open_comm()
             self.connected = True
-            self.update_connection_status(True, "Connected")
-            self.connect_button.config(text="Disconnect from Hotplate")
             self.temp_data.clear()
             
             # Start background polling thread
             self.polling_stop.clear()
             self.polling_thread = threading.Thread(target=self.background_polling, daemon=True)
             self.polling_thread.start()
+            
+            self.root.after(0, lambda: self.update_connection_status(True, "Connected"))
+            self.root.after(0, lambda: self.connect_button.config(text="Disconnect from Hotplate"))
         except Exception as e:
-            messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}")
-            self.update_connection_status(False, "Connection Failed")
+            self.root.after(0, lambda: messagebox.showerror("Connection Error", f"Failed to connect: {str(e)}"))
+            self.root.after(0, lambda: self.update_connection_status(False, "Connection Failed"))
     
     def disconnect(self):
-        """Close connection to hotplate"""
+        """Close connection to hotplate (runs in worker thread)"""
         try:
+            self.update_connection_status(False, "Disconnecting...")
+            
             # Stop background polling thread
             self.polling_stop.set()
             if self.polling_thread and self.polling_thread.is_alive():
@@ -271,10 +287,11 @@ class HotplateGUI:
             if self.ser:
                 hw.close_comm(self.ser)
             self.connected = False
-            self.update_connection_status(False, "Disconnected")
-            self.connect_button.config(text="Connect to Hotplate")
+            
+            self.root.after(0, lambda: self.update_connection_status(False, "Disconnected"))
+            self.root.after(0, lambda: self.connect_button.config(text="Connect to Hotplate"))
         except Exception as e:
-            messagebox.showerror("Disconnection Error", f"Error during disconnect: {str(e)}")
+            self.root.after(0, lambda: messagebox.showerror("Disconnection Error", f"Error during disconnect: {str(e)}"))
     
     def update_connection_status(self, connected, status):
         """Update connection status display"""
@@ -347,14 +364,20 @@ class HotplateGUI:
         
         self.ax.clear()
         if times and temps:
-            # Convert seconds to datetime objects for formatting
-            base_time = datetime(2000, 1, 1)  # Arbitrary base date
-            time_objs = [base_time + timedelta(seconds=t) for t in times]
+            self.ax.plot(times, temps, 'b-', linewidth=2, label='Temperature')
             
-            self.ax.plot(time_objs, temps, 'b-', linewidth=2, label='Temperature')
+            # Set x-axis to show last 12 hours, with right side at current time
+            current_time = times[-1] if times else 0
+            left_limit = max(0, current_time - 43200)  # 12 hours = 43200 seconds
+            self.ax.set_xlim([left_limit, current_time])
             
-            # Format x-axis as hh:mm:ss
-            self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S'))
+            # Format x-axis as time labels
+            def format_seconds(seconds, pos):
+                hours = int(seconds // 3600)
+                minutes = int((seconds % 3600) // 60)
+                return f"{hours:02d}:{minutes:02d}"
+            
+            self.ax.xaxis.set_major_formatter(FuncFormatter(format_seconds))
             self.figure.autofmt_xdate()  # Rotate and align the tick labels
             
             # Get setpoint temperature and draw horizontal line
@@ -367,7 +390,7 @@ class HotplateGUI:
                 except:
                     pass
         
-        self.ax.set_xlabel("Time (hh:mm:ss)")
+        self.ax.set_xlabel("Elapsed Time (hh:mm)")
         self.ax.set_ylabel("Temperature (°C)")
         self.ax.set_title("Temperature vs Time")
         self.ax.grid(True, alpha=0.3)
@@ -377,93 +400,54 @@ class HotplateGUI:
         self.canvas.draw()
     
     def set_temperature(self):
-        """Set the heater temperature setpoint"""
+        """Queue temperature setting command"""
         if not self.connected:
             messagebox.showwarning("Not Connected", "Please connect to hotplate first")
             return
         
         try:
             temp = int(self.set_temp_input.get())
-            with self.serial_lock:
-                result = hw.set_heater_temp(self.ser, temp)
-            if result:
-                messagebox.showinfo("Success", f"Temperature set to {temp} °C")
-            else:
-                messagebox.showwarning("Failed", "Failed to set temperature")
-        except Exception as e:
-            messagebox.showerror("Error", f"Error setting temperature: {str(e)}")
+            self.queue_command('set_temperature', temp)
+        except ValueError:
+            messagebox.showerror("Error", "Invalid temperature value")
     
     def set_ramp_rate(self):
-        """Set the heater ramp rate"""
+        """Queue ramp rate setting command"""
         if not self.connected:
             messagebox.showwarning("Not Connected", "Please connect to hotplate first")
             return
         
         try:
             ramp = int(self.set_ramp_input.get())
-            with self.serial_lock:
-                result = hw.set_heater_ramp(self.ser, ramp)
-            if result:
-                messagebox.showinfo("Success", f"Ramp rate set to {ramp} °C/hr")
-            else:
-                messagebox.showwarning("Failed", "Failed to set ramp rate")
-        except Exception as e:
-            messagebox.showerror("Error", f"Error setting ramp rate: {str(e)}")
+            self.queue_command('set_ramp_rate', ramp)
+        except ValueError:
+            messagebox.showerror("Error", "Invalid ramp rate value")
     
     def set_stir_speed(self):
-        """Set the stirrer speed"""
+        """Queue stir speed setting command"""
         if not self.connected:
             messagebox.showwarning("Not Connected", "Please connect to hotplate first")
             return
         
         try:
             speed = int(self.set_stir_input.get())
-            with self.serial_lock:
-                if speed == 0:
-                    result = hw.set_stir_off(self.ser)
-                else:
-                    result = hw.set_stir(self.ser, speed)
-            
-            if speed == 0:
-                messagebox.showinfo("Success", "Stirrer turned off")
-            elif result:
-                messagebox.showinfo("Success", f"Stir speed set to {speed} RPM")
-            else:
-                messagebox.showwarning("Failed", "Failed to set stir speed")
-        except Exception as e:
-            messagebox.showerror("Error", f"Error setting stir speed: {str(e)}")
+            self.queue_command('set_stir_speed', speed)
+        except ValueError:
+            messagebox.showerror("Error", "Invalid stir speed value")
     
     def turn_off_heater(self):
-        """Turn off the heater"""
+        """Queue heater off command"""
         if not self.connected:
             messagebox.showwarning("Not Connected", "Please connect to hotplate first")
             return
-        
-        try:
-            with self.serial_lock:
-                result = hw.set_heater_off(self.ser)
-            if result:
-                messagebox.showinfo("Success", "Heater turned off")
-            else:
-                messagebox.showwarning("Failed", "Failed to turn off heater")
-        except Exception as e:
-            messagebox.showerror("Error", f"Error turning off heater: {str(e)}")
+        self.queue_command('turn_off_heater', None)
     
     def turn_off_stirrer(self):
-        """Turn off the stirrer"""
+        """Queue stirrer off command"""
         if not self.connected:
             messagebox.showwarning("Not Connected", "Please connect to hotplate first")
             return
-        
-        try:
-            with self.serial_lock:
-                result = hw.set_stir_off(self.ser)
-            if result:
-                messagebox.showinfo("Success", "Stirrer turned off")
-            else:
-                messagebox.showwarning("Failed", "Failed to turn off stirrer")
-        except Exception as e:
-            messagebox.showerror("Error", f"Error turning off stirrer: {str(e)}")
+        self.queue_command('turn_off_stirrer', None)
     
     def clear_plot_data(self):
         """Clear temperature plot data"""
@@ -500,6 +484,7 @@ class HotplateGUI:
         """Start recipe execution in a background thread"""
         self.recipe_stop.clear()
         self.recipe_continue.clear()
+        self.temp_data.clear()
         self.open_recipe_window(file_path)
 
         self.recipe_thread = threading.Thread(
@@ -548,7 +533,7 @@ class HotplateGUI:
         button_frame = ttk.Frame(frame)
         button_frame.pack(fill=tk.X, pady=(10, 0))
 
-        self.recipe_continue_button = ttk.Button(button_frame, text="Continue", command=self.recipe_continue_step)
+        self.recipe_continue_button = ttk.Button(button_frame, text="Next Step", command=self.recipe_continue_step)
         self.recipe_continue_button.pack(side=tk.LEFT)
         self.recipe_continue_button.config(state=tk.DISABLED)
 
@@ -636,22 +621,43 @@ class HotplateGUI:
             dwell = update.get("dwell_seconds", "--")
             self.recipe_labels["dwell"].config(text=f"Dwell: {dwell} s")
             self.recipe_labels["message"].config(text="")
+            # Enable continue button to skip this step
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.NORMAL)
         elif update_type == "stabilizing_start":
             self.recipe_labels["message"].config(text="Stabilizing temperature...")
+            # Keep continue button enabled to skip stabilization
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.NORMAL)
         elif update_type == "stabilizing":
             temp = update.get("temp", "--")
             self.recipe_labels["message"].config(text=f"Stabilizing... Current temp: {temp} °C")
+            # Keep continue button enabled to skip stabilization
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.NORMAL)
         elif update_type == "dwell_start":
             dwell = update.get("dwell_seconds", "--")
             self.recipe_labels["dwell"].config(text=f"Dwell: {dwell} s")
+            # Keep continue button enabled to skip dwell
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.NORMAL)
         elif update_type == "dwell_tick":
             remaining = update.get("remaining", "--")
             self.recipe_labels["message"].config(text=f"Dwell remaining: {remaining} s")
+            # Keep continue button enabled to skip dwell
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.NORMAL)
         elif update_type == "final_cooling_start":
             self.recipe_labels["message"].config(text="Waiting for hotplate to reach 30 °C...")
+            # Keep continue button enabled to skip cooling
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.NORMAL)
         elif update_type == "final_cooling":
             temp = update.get("temp", "--")
             self.recipe_labels["message"].config(text=f"Cooling... Current temp: {temp} °C")
+            # Keep continue button enabled to skip cooling
+            if self.recipe_continue_button:
+                self.recipe_continue_button.config(state=tk.NORMAL)
         elif update_type == "await_continue":
             self.recipe_labels["message"].config(text="Waiting for continue...")
             if self.recipe_continue_button:
@@ -678,12 +684,121 @@ class HotplateGUI:
                 self.recipe_abort_button.config(state=tk.DISABLED)
     
     def save_csv(self):
-        """Save temperature plot data to CSV file"""
+        """Queue CSV save command"""
         times, temps = self.temp_data.get_data()
         
         if not times or not temps:
             messagebox.showwarning("No Data", "No temperature data to save")
             return
+        
+        self.queue_command('save_csv', {'times': times, 'temps': temps})
+    
+    def queue_command(self, command, data):
+        """Queue a command for the worker thread"""
+        if self.operation_in_progress and command != 'connect' and command != 'disconnect':
+            messagebox.showwarning("Operation in Progress", "Another operation is currently running")
+            return
+        self.command_queue.put((command, data))
+    
+    def command_worker(self):
+        """Worker thread that processes queued commands sequentially"""
+        while not self.command_stop.is_set():
+            try:
+                command, data = self.command_queue.get(timeout=0.5)
+                self.operation_in_progress = True
+                
+                try:
+                    if command == 'connect':
+                        self.connect()
+                    elif command == 'disconnect':
+                        self.disconnect()
+                    elif command == 'set_temperature' and self.connected and self.ser:
+                        self._do_set_temperature(data)
+                    elif command == 'set_ramp_rate' and self.connected and self.ser:
+                        self._do_set_ramp_rate(data)
+                    elif command == 'set_stir_speed' and self.connected and self.ser:
+                        self._do_set_stir_speed(data)
+                    elif command == 'turn_off_heater' and self.connected and self.ser:
+                        self._do_turn_off_heater()
+                    elif command == 'turn_off_stirrer' and self.connected and self.ser:
+                        self._do_turn_off_stirrer()
+                    elif command == 'save_csv':
+                        self._do_save_csv(data)
+                finally:
+                    self.operation_in_progress = False
+            except:
+                pass
+    
+    def _do_set_temperature(self, temp):
+        """Actually set the temperature (runs in worker thread)"""
+        try:
+            with self.serial_lock:
+                result = hw.set_heater_temp(self.ser, temp)
+            if result:
+                self.root.after(0, lambda: messagebox.showinfo("Success", f"Temperature set to {temp} °C"))
+            else:
+                self.root.after(0, lambda: messagebox.showwarning("Failed", "Failed to set temperature"))
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Error setting temperature: {str(e)}"))
+    
+    def _do_set_ramp_rate(self, ramp):
+        """Actually set the ramp rate (runs in worker thread)"""
+        try:
+            with self.serial_lock:
+                result = hw.set_heater_ramp(self.ser, ramp)
+            if result:
+                self.root.after(0, lambda: messagebox.showinfo("Success", f"Ramp rate set to {ramp} °C/hr"))
+            else:
+                self.root.after(0, lambda: messagebox.showwarning("Failed", "Failed to set ramp rate"))
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Error setting ramp rate: {str(e)}"))
+    
+    def _do_set_stir_speed(self, speed):
+        """Actually set the stir speed (runs in worker thread)"""
+        try:
+            with self.serial_lock:
+                if speed == 0:
+                    result = hw.set_stir_off(self.ser)
+                else:
+                    result = hw.set_stir(self.ser, speed)
+            
+            if speed == 0:
+                self.root.after(0, lambda: messagebox.showinfo("Success", "Stirrer turned off"))
+            elif result:
+                self.root.after(0, lambda: messagebox.showinfo("Success", f"Stir speed set to {speed} RPM"))
+            else:
+                self.root.after(0, lambda: messagebox.showwarning("Failed", "Failed to set stir speed"))
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Error setting stir speed: {str(e)}"))
+    
+    def _do_turn_off_heater(self):
+        """Actually turn off the heater (runs in worker thread)"""
+        try:
+            with self.serial_lock:
+                result = hw.set_heater_off(self.ser)
+            if result:
+                self.root.after(0, lambda: messagebox.showinfo("Success", "Heater turned off"))
+            else:
+                self.root.after(0, lambda: messagebox.showwarning("Failed", "Failed to turn off heater"))
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Error turning off heater: {str(e)}"))
+    
+    def _do_turn_off_stirrer(self):
+        """Actually turn off the stirrer (runs in worker thread)"""
+        try:
+            with self.serial_lock:
+                result = hw.set_stir_off(self.ser)
+            if result:
+                self.root.after(0, lambda: messagebox.showinfo("Success", "Stirrer turned off"))
+            else:
+                self.root.after(0, lambda: messagebox.showwarning("Failed", "Failed to turn off stirrer"))
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Error turning off stirrer: {str(e)}"))
+    
+    def _do_save_csv(self, data):
+        """Actually save the CSV file (runs in worker thread)"""
+        times = data['times']
+        temps = data['temps']
         
         try:
             # Open file dialog to choose save location
@@ -700,12 +815,17 @@ class HotplateGUI:
                     for t, temp in zip(times, temps):
                         writer.writerow([t, temp])
                 
-                messagebox.showinfo("Success", f"Data saved to {file_path}")
+                self.root.after(0, lambda: messagebox.showinfo("Success", f"Data saved to {file_path}"))
         except Exception as e:
-            messagebox.showerror("Error", f"Error saving CSV: {str(e)}")
+            self.root.after(0, lambda: messagebox.showerror("Error", f"Error saving CSV: {str(e)}"))
     
     def on_closing(self):
         """Handle window close event"""
+        # Stop command worker
+        self.command_stop.set()
+        if self.command_thread and self.command_thread.is_alive():
+            self.command_thread.join(timeout=2)
+        
         if self.recipe_thread and self.recipe_thread.is_alive():
             self.recipe_stop.set()
         # Stop polling thread
@@ -714,7 +834,15 @@ class HotplateGUI:
             self.polling_thread.join(timeout=2)
         
         if self.connected:
-            self.disconnect()
+            try:
+                # Synchronous disconnect on exit
+                self.polling_stop.set()
+                if self.polling_thread and self.polling_thread.is_alive():
+                    self.polling_thread.join(timeout=2)
+                if self.ser:
+                    hw.close_comm(self.ser)
+            except:
+                pass
         self.root.destroy()
 
 def main():
